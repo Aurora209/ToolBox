@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "D:\GitHub\Aurora209\ToolBox\main.py", line 21, in main
-    app = MiniToolBox()
-          ^^^^^^^^^^^
-NameError: name 'MiniToolBox' is not defined
