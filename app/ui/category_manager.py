@@ -1,100 +1,62 @@
 # File: ToolBox/app/ui/category_manager.py
 
-def on_tree_select(app, event):
-    """处理分类树选择事件"""
-    # 保护性检查：如果没有选择项，直接返回（避免 IndexError）
-    sel = app.category_tree.selection()
+def on_tree_select(app, event=None):
+    """处理分类树选择事件：一级分类=汇总二级目录；二级分类=只显示当前目录"""
+    tree = getattr(app, "category_tree", None) or getattr(app, "tree", None)
+    if tree is None:
+        return
+
+    sel = tree.selection()
     if not sel:
         return
 
-    item = sel[0]
-    item_text = app.category_tree.item(item, "text")
+    item_id = sel[0]
+    parent_id = tree.parent(item_id)
 
-    # 检查是否为子分类
-    is_subcategory = app.category_tree.parent(item) != ""
+    # 读取该节点绑定的路径（values[0]）
+    values = tree.item(item_id, "values") or []
+    selected_path = values[0] if values else None
+    if not selected_path:
+        # 没有路径就回退到 storage 根
+        selected_path = getattr(app, "storage_path", None)
 
-    if is_subcategory:
-        # 获取主分类ID
-        parent_item = app.category_tree.parent(item)
-        parent_text = app.category_tree.item(parent_item, "text")
+    # 标记当前选择层级：一级=1，二级=2
+    # parent 为空表示一级分类
+    app.selected_category_depth = 1 if parent_id == "" else 2
+    app.selected_category_path = selected_path
+    app.showing_all_tools = False
 
-        # 获取主分类ID（从配置中）
-        for i in range(1, int(app.config['Categories'].get('count', '0')) + 1):
-            cat_name = app.config['Categories'].get(str(i), f"分类{i}")
-            if f"📁 {cat_name}" in parent_text:
-                app.current_category = i
-                app.current_subcategory = item_text.replace("  📂 ", "")
-                break
-    else:
-        # 主分类
-        for i in range(1, int(app.config['Categories'].get('count', '0')) + 1):
-            cat_name = app.config['Categories'].get(str(i), f"分类{i}")
-            if f"📁 {cat_name}" in item_text:
-                app.current_category = i
-                app.current_subcategory = ""
-                break
-
-    app.load_and_display_tools()
-
-
-def on_tree_double_click(app, event):
-    """处理分类树双击事件"""
-    # 保护性检查：防止双击事件触发但没有选择项
-    sel = app.category_tree.selection()
-    if not sel:
-        return
-
-    item = sel[0]
-    item_text = app.category_tree.item(item, "text")
-
-    # 检查是否为子分类
-    is_subcategory = app.category_tree.parent(item) != ""
-
-    if is_subcategory:
-        # 获取主分类ID
-        parent_item = app.category_tree.parent(item)
-        parent_text = app.category_tree.item(parent_item, "text")
-
-        # 获取主分类ID（从配置中）
-        for i in range(1, int(app.config['Categories'].get('count', '0')) + 1):
-            cat_name = app.config['Categories'].get(str(i), f"分类{i}")
-            if f"📁 {cat_name}" in parent_text:
-                app.current_category = i
-                app.current_subcategory = item_text.replace("  📂 ", "")
-                break
-    else:
-        # 主分类
-        for i in range(1, int(app.config['Categories'].get('count', '0')) + 1):
-            cat_name = app.config['Categories'].get(str(i), f"分类{i}")
-            if f"📁 {cat_name}" in item_text:
-                app.current_category = i
-                app.current_subcategory = ""
-                break
-
-    app.load_and_display_tools()
-
-
-def select_category(app, category_id):
-    """选择指定分类"""
-    app.current_category = category_id
-    app.current_subcategory = ""
-    
-    # 在树形控件中选择对应的项目
-    items = app.category_tree.get_children()
-    if category_id <= len(items):
-        app.category_tree.selection_set(items[category_id - 1])
-        app.category_tree.focus(items[category_id - 1])
-    
-    app.load_and_display_tools()
+    # 触发加载显示（你 app.py 里已有 load_and_display_tools 方法）
+    try:
+        app.load_and_display_tools()
+    except Exception:
+        # 兜底：直接调用 service（避免某些版本的 app.load_and_display_tools 依赖 tree 未初始化）
+        try:
+            from ..services.category_service import load_and_display_tools
+            load_and_display_tools(app, selected_path)
+        except Exception as e:
+            print(f"on_tree_select: 加载显示失败: {e}")
 
 
 def show_all_tools(app):
     """显示所有工具"""
     app.showing_all_tools = True
-    app.current_category = 0
-    app.current_subcategory = ""
-    
-    # 清除树形控件的选择
-    app.category_tree.selection_remove(app.category_tree.selection())
-    
-    app.load_and_display_all_tools()
+    app.selected_category_depth = 0
+    app.selected_category_path = getattr(app, "storage_path", None)
+
+    # 清除树形控件选择
+    tree = getattr(app, "category_tree", None) or getattr(app, "tree", None)
+    if tree is not None:
+        try:
+            tree.selection_remove(tree.selection())
+        except Exception:
+            pass
+
+    try:
+        app.load_and_display_all_tools()
+    except Exception:
+        try:
+            from ..services.category_service import load_and_display_all_tools
+            load_and_display_all_tools(app)
+        except Exception as e:
+            print(f"show_all_tools: 显示所有工具失败: {e}")

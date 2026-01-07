@@ -1,8 +1,12 @@
+from tkinter import Toplevel, Frame, Button
+import tkinter.ttk as ttk
+from pathlib import Path
+
+from ..services.archive_service import extract_archive
+
+
 def show_archive_manager(self):
     """显示压缩包管理界面"""
-    from tkinter import Toplevel, Label, Frame, Button
-    import tkinter.ttk as ttk
-    from pathlib import Path
 
     # 创建新窗口
     win = Toplevel(self.root)
@@ -15,13 +19,12 @@ def show_archive_manager(self):
     table_frame = Frame(win)
     table_frame.pack(fill='both', expand=True, padx=10, pady=10)
 
-    # 创建Treeview
     columns = ('序号', '压缩包名称', '路径', '大小', '修改时间', '分类')
     tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
 
     # 定义列标题和宽度
     column_widths = {'序号': 60, '压缩包名称': 200, '路径': 300, '大小': 100, '修改时间': 150, '分类': 100}
-    
+
     for col in columns:
         tree.heading(col, text=col)
         tree.column(col, width=column_widths[col], anchor='w')
@@ -49,25 +52,31 @@ def show_archive_manager(self):
                 # 扫描主分类目录
                 archives = self.scan_directory_for_archives(cat_dir, cat_name)
                 all_archives.extend(archives)
-                
+
                 # 扫描子分类目录
                 for sub_dir in cat_dir.iterdir():
                     if sub_dir.is_dir():
-                        sub_archives = self.scan_directory_for_archives(sub_dir, f"{cat_name} - {sub_dir.name}")
+                        sub_archives = self.scan_directory_for_archives(
+                            sub_dir, f"{cat_name} - {sub_dir.name}"
+                        )
                         all_archives.extend(sub_archives)
 
-    # 插入数据
-    for idx, archive in enumerate(all_archives, 1):
-        tree.insert('', 'end', values=(
-            idx,
-            archive['name'],
-            archive['path'],
-            archive['size'],
-            archive['mtime'],
-            archive['category']
-        ))
+    # 填充表格
+    tree.delete(*tree.get_children())
+    for idx, a in enumerate(all_archives, start=1):
+        tree.insert(
+            '',
+            'end',
+            values=(
+                idx,
+                a.get('name', ''),
+                a.get('path', ''),
+                a.get('size', ''),
+                a.get('mtime', ''),
+                a.get('category', '')
+            )
+        )
 
-    # 双击解压交互：双击某行直接解压
     def on_double(event):
         sel = tree.selection()
         if not sel:
