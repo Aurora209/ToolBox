@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "D:\OneDrive\GitHub\Aurora209\ToolBox\main.py", line 21, in main
+    app = ToolBox()
+  File "D:\OneDrive\GitHub\Aurora209\ToolBox\app\app.py", line 82, in __init__
+    create_ui(self)
+    ~~~~~~~~~^^^^^^
+  File "D:\OneDrive\GitHub\Aurora209\ToolBox\app\ui\main_window.py", line 36, in create_ui
+    create_category_panel(app, main_frame)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "D:\OneDrive\GitHub\Aurora209\ToolBox\app\ui\category_panel.py", line 60, in create_category_panel
+    command=app.show_category_settings).pack(fill='x', pady=(2, 0))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'ToolBox' object has no attribute 'show_category_settings'. Did you mean: 'show_auto_record_settings'?

@@ -5,6 +5,12 @@ from pathlib import Path
 
 from ..utils.type_utils import get_file_type_category
 
+# ✅ 分类刷新前清理孤儿记录
+try:
+    from .tool_scanner import prune_missing_tool_records
+except Exception:
+    prune_missing_tool_records = None
+
 
 def _get_supported_exts(app):
     """支持的工具后缀：优先用 app.supported_extensions，没有就给默认集合"""
@@ -24,6 +30,22 @@ def _format_category(rel_path: str) -> str:
     rel_path = (rel_path or ".").replace("/", os.sep).replace("\\", os.sep)
     parts = [p for p in rel_path.split(os.sep) if p and p != "."]
     return " > ".join(parts) if parts else "所有工具"
+
+
+def _resolve_under_storage(storage_path: str, path: str) -> str:
+    """
+    🔒 强制把任何路径钉死在 storage_path 下：
+    - 如果 path 在 storage 下：返回 path
+    - 否则：回退为 storage_path
+    """
+    try:
+        storage = os.path.abspath(storage_path)
+        p = os.path.abspath(path)
+        if os.path.commonpath([storage, p]) == storage:
+            return p
+    except Exception:
+        pass
+    return os.path.abspath(storage_path)
 
 
 def get_subcategories_for_category(app, cat_id):
@@ -61,17 +83,13 @@ def get_current_scan_info(app):
     """
     给拖拽/复制等逻辑使用：
     返回 (dir_path, display_name, is_all)
-    - is_all=True 代表当前是“所有工具”视图，不允许拖拽直接归类
     """
     storage = getattr(app, "storage_path", None)
 
-    # 所有工具视图
     if getattr(app, "showing_all_tools", False):
         return storage, "所有工具", True
 
-    # 当前选择分类
     sel = getattr(app, "selected_category_path", None) or storage
-    depth = getattr(app, "selected_category_depth", None)
 
     display_name = "所有工具"
     try:
@@ -91,7 +109,7 @@ def _build_tool_item(app, file_path: Path, rel_category_path: str):
     tool_path = str(file_path)
     ext = file_path.suffix.lower()
 
-    # 自定义标题/备注（ToolInfo 用绝对路径 key）
+    # ToolInfo 用绝对路径 key
     name = file_path.stem
     note = ""
     try:
@@ -137,7 +155,6 @@ def _scan_one_dir(app, dir_path: Path, rel_category_path: str):
 
 def _apply_search_and_type_filter(app, tools):
     """应用搜索与类型过滤（如果 UI 里有 search_var / filetype_var）"""
-    # 搜索过滤
     qv = getattr(app, "search_var", None)
     if qv is not None:
         q = (qv.get() or "").strip().lower()
@@ -150,7 +167,6 @@ def _apply_search_and_type_filter(app, tools):
                 )
             tools = [t for t in tools if hit(t)]
 
-    # 类型过滤
     tv = getattr(app, "filetype_var", None)
     if tv is not None:
         selected = tv.get()
@@ -162,24 +178,36 @@ def _apply_search_and_type_filter(app, tools):
 
 def load_and_display_tools(app, selected_category_path: str):
     """
-    加载并显示选中分类的工具：
-    ✅ 一级分类：显示该一级目录下所有二级目录中的工具（只扫二级，不递归更深）
-    ✅ 二级分类：仅显示当前二级目录中的工具
+    ✅ 点击分类树即清孤儿记录
+    ✅ 路径强制限制在 Storage 下（不会跑到盘符根）
+    ✅ 一级分类：汇总其下所有二级目录工具（只扫二级，不递归更深）
+    ✅ 二级分类：仅显示当前目录工具
     """
-    storage_path = getattr(app, "storage_path", None) or selected_category_path
-    storage_path = str(storage_path)
-    selected_category_path = str(selected_category_path or storage_path)
+    # ✅ 关键：刷新前清理孤儿记录
+    try:
+        if prune_missing_tool_records:
+            prune_missing_tool_records(app)
+    except Exception as e:
+        print(f"load_and_display_tools: prune_missing_tool_records 失败: {e}")
+
+    if not getattr(app, "storage_path", None):
+        return
+
+    # 🔒 强制以 Storage 为唯一根
+    storage_path = os.path.abspath(app.storage_path)
+    selected_category_path = selected_category_path or storage_path
+    selected_category_path = _resolve_under_storage(storage_path, selected_category_path)
 
     base = Path(storage_path)
     sel = Path(selected_category_path)
 
-    # 相对路径（用于 category 显示）
+    # 相对路径（用于“分类”列显示）
     try:
         rel = os.path.relpath(str(sel), str(base))
     except Exception:
         rel = "."
 
-    # 层级：优先用 category_manager 设置的 depth
+    # 层级：优先使用 category_manager 设置的 depth
     depth = getattr(app, "selected_category_depth", None)
     if depth not in (1, 2):
         if rel == ".":
@@ -193,7 +221,6 @@ def load_and_display_tools(app, selected_category_path: str):
     if depth == 1:
         # ✅ 一级：汇总一级目录内文件 + 所有二级文件夹内文件（只一层）
         tools.extend(_scan_one_dir(app, sel, rel))
-
         try:
             subdirs = [p for p in sel.iterdir() if p.is_dir()]
             subdirs.sort(key=lambda x: x.name.lower())
@@ -202,7 +229,6 @@ def load_and_display_tools(app, selected_category_path: str):
                 tools.extend(_scan_one_dir(app, sd, sub_rel))
         except Exception as e:
             print(f"一级分类汇总扫描失败: {sel} -> {e}")
-
         category_name = _format_category(rel)
     else:
         # ✅ 二级（或更深）：只显示当前目录
@@ -220,12 +246,18 @@ def load_and_display_tools(app, selected_category_path: str):
 
 
 def load_and_display_all_tools(app):
-    """显示所有工具：递归扫描 storage_path"""
-    storage_path = getattr(app, "storage_path", None)
-    if not storage_path:
+    """显示所有工具：递归扫描 Storage；刷新前也清理孤儿记录"""
+    try:
+        if prune_missing_tool_records:
+            prune_missing_tool_records(app)
+    except Exception as e:
+        print(f"load_and_display_all_tools: prune_missing_tool_records 失败: {e}")
+
+    if not getattr(app, "storage_path", None):
         return
 
-    base = Path(str(storage_path))
+    storage_path = os.path.abspath(app.storage_path)
+    base = Path(storage_path)
     supported = _get_supported_exts(app)
 
     tools = []

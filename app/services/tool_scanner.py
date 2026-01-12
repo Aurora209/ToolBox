@@ -6,18 +6,204 @@ from pathlib import Path
 from ..utils.size_utils import format_size
 from ..utils.type_utils import get_file_type_category
 
-# 修改记录文件路径为应用目录下
 RECORD_FILE = Path(__file__).parent.parent.parent / "tools_record.json"
 
 
 def _norm_key(key: str) -> str:
-    """统一 ToolAddedRecord 的 key：分隔符 + 小写（避免 configparser/大小写导致查不到）"""
+    """统一 ToolAddedRecord 的 key：分隔符 + 小写"""
     return (key or "").replace("/", "\\").strip().lower()
 
 
+def _resolve_record_abs_path(app, record_key: str) -> str:
+    """
+    将 ToolAddedRecord 的 key 解析为绝对路径：
+
+    规则（关键修复点）：
+    - 若 key 是绝对路径（含盘符/UNC）：直接返回该绝对路径（用于判断是否“越界”）
+    - 若 key 是相对路径：只能拼到 storage_path 下；如果拼出来不在 storage 内，返回空字符串
+    """
+    k = (record_key or "").strip()
+    if not k:
+        return ""
+
+    # 绝对路径（Windows）
+    if (len(k) >= 2 and k[1] == ":") or k.startswith("\\\\"):
+        return os.path.normpath(os.path.abspath(k))
+
+    storage = getattr(app, "storage_path", None)
+    if not storage:
+        return ""
+
+    storage_abs = os.path.abspath(str(storage))
+    abs_path = os.path.normpath(os.path.abspath(os.path.join(storage_abs, k)))
+
+    # 🔒 关键：相对 key 拼出来必须仍在 storage 内
+    try:
+        if os.path.commonpath([storage_abs, abs_path]) != storage_abs:
+            return ""
+    except Exception:
+        return ""
+
+    return abs_path
+
+
+def prune_missing_tool_records(app):
+    """
+    清理所有“文件已不存在”的记录，或“越界（不在 Storage 内）”的记录：
+    - ToolAddedRecord（ini）
+    - tools_added_record（内存）
+    - ToolInfo（ini，按绝对路径 key）
+    - tools_record.json（使用记录）
+    """
+    storage = getattr(app, "storage_path", None)
+    storage_abs = os.path.abspath(str(storage)) if storage else None
+
+    to_remove_keys = []
+
+    # 1) config 中的 ToolAddedRecord
+    try:
+        if hasattr(app, "config") and "ToolAddedRecord" in app.config:
+            sec = app.config["ToolAddedRecord"]
+            for raw_key in list(sec.keys()):
+                abs_path = _resolve_record_abs_path(app, raw_key)
+
+                # ✅ 若 abs_path 为空：说明相对 key 拼接越界，直接删
+                if not abs_path:
+                    to_remove_keys.append(raw_key)
+                    continue
+
+                # ✅ 绝对路径越界：不在 Storage 内，也删
+                if storage_abs:
+                    try:
+                        if os.path.commonpath([storage_abs, abs_path]) != storage_abs:
+                            to_remove_keys.append(raw_key)
+                            continue
+                    except Exception:
+                        to_remove_keys.append(raw_key)
+                        continue
+
+                # ✅ 文件不存在：删
+                if not os.path.exists(abs_path):
+                    to_remove_keys.append(raw_key)
+    except Exception as e:
+        print(f"prune_missing_tool_records: 遍历 ToolAddedRecord 失败: {e}")
+
+    # 2) 内存 tools_added_record
+    try:
+        tar = getattr(app, "tools_added_record", None)
+        if isinstance(tar, dict):
+            for raw_key in list(tar.keys()):
+                abs_path = _resolve_record_abs_path(app, raw_key)
+
+                if not abs_path:
+                    if raw_key not in to_remove_keys:
+                        to_remove_keys.append(raw_key)
+                    continue
+
+                if storage_abs:
+                    try:
+                        if os.path.commonpath([storage_abs, abs_path]) != storage_abs:
+                            if raw_key not in to_remove_keys:
+                                to_remove_keys.append(raw_key)
+                            continue
+                    except Exception:
+                        if raw_key not in to_remove_keys:
+                            to_remove_keys.append(raw_key)
+                        continue
+
+                if not os.path.exists(abs_path):
+                    if raw_key not in to_remove_keys:
+                        to_remove_keys.append(raw_key)
+    except Exception:
+        pass
+
+    if not to_remove_keys:
+        return
+
+    # 3) 删除 ToolAddedRecord / 内存 tools_added_record
+    try:
+        if hasattr(app, "config") and "ToolAddedRecord" in app.config:
+            sec = app.config["ToolAddedRecord"]
+            for k in to_remove_keys:
+                sec.pop(k, None)
+                sec.pop(_norm_key(k), None)
+    except Exception as e:
+        print(f"prune_missing_tool_records: 删除 ToolAddedRecord 失败: {e}")
+
+    try:
+        tar = getattr(app, "tools_added_record", None)
+        if isinstance(tar, dict):
+            for k in to_remove_keys:
+                tar.pop(k, None)
+                tar.pop(_norm_key(k), None)
+    except Exception:
+        pass
+
+    # 4) 删除 ToolInfo（绝对路径 key：path_name / path_note）
+    try:
+        if hasattr(app, "config") and "ToolInfo" in app.config:
+            info = app.config["ToolInfo"]
+            for k in to_remove_keys:
+                abs_path = _resolve_record_abs_path(app, k)
+                if abs_path:
+                    info.pop(abs_path + "_name", None)
+                    info.pop(abs_path + "_note", None)
+    except Exception as e:
+        print(f"prune_missing_tool_records: 删除 ToolInfo 失败: {e}")
+
+    # 5) 删除 tools_record.json 中 path 指向不存在/越界的记录
+    try:
+        tr = getattr(app, "tools_record", None)
+        if isinstance(tr, dict) and tr:
+            dead = []
+            for rk, rv in tr.items():
+                p = ""
+                try:
+                    p = rv.get("path", "")
+                except Exception:
+                    p = ""
+                if not p:
+                    continue
+
+                abs_p = os.path.abspath(os.path.normpath(p))
+
+                # 不在 Storage 内 -> 删
+                if storage_abs:
+                    try:
+                        if os.path.commonpath([storage_abs, abs_p]) != storage_abs:
+                            dead.append(rk)
+                            continue
+                    except Exception:
+                        dead.append(rk)
+                        continue
+
+                # 不存在 -> 删
+                if not os.path.exists(abs_p):
+                    dead.append(rk)
+
+            for rk in dead:
+                tr.pop(rk, None)
+    except Exception:
+        pass
+
+    # 6) 保存 ini + tools_record.json
+    try:
+        if hasattr(app, "config_manager"):
+            app.config_manager.save_config()
+    except Exception as e:
+        print(f"prune_missing_tool_records: 保存 ini 失败: {e}")
+
+    try:
+        save_tools_record(app)
+    except Exception:
+        pass
+
+    print(f"prune_missing_tool_records: 已清理 {len(to_remove_keys)} 条不存在/越界文件的记录")
+
+
 def load_tools_record(app):
-    """加载工具使用记录（tools_record.json）"""
-    app.tools_record = {}  # {key: record_dict}
+    """加载工具使用记录（tools_record.json），并清理孤儿记录"""
+    app.tools_record = {}
     app.record_file = RECORD_FILE
 
     if os.path.exists(RECORD_FILE):
@@ -27,6 +213,12 @@ def load_tools_record(app):
         except Exception as e:
             print(f"加载工具记录失败: {e}")
             app.tools_record = {}
+
+    # ✅ 启动时清理
+    try:
+        prune_missing_tool_records(app)
+    except Exception:
+        pass
 
 
 def save_tools_record(app):
@@ -60,12 +252,12 @@ def record_tool_usage(app, tool_path, tool_name, category):
 
 
 def scan_directory(self, directory: Path, category_name: str):
-    """扫描目录中的工具文件"""
+    """扫描目录中的工具文件（只扫描传入目录）"""
     tools = []
     supported = {
         ".exe", ".msi", ".zip", ".rar", ".7z", ".pdf", ".txt",
-        ".bat", ".cmd", ".reg", ".lnk", ".png", ".jpg", ".mp4",
-        ".mp3", ".py", ".docx", ".xlsx", ".pptx"
+        ".bat", ".cmd", ".reg", ".lnk", ".png", ".jpg", ".jpeg",
+        ".mp4", ".mp3", ".py", ".pyw", ".docx", ".xlsx", ".pptx"
     }
 
     if not directory.exists():
@@ -77,7 +269,6 @@ def scan_directory(self, directory: Path, category_name: str):
                 st = p.stat()
                 tool_path = str(p)
 
-                # 自定义标题/备注（ToolInfo 用绝对路径）
                 custom_name = self.config.get("ToolInfo", tool_path + "_name", fallback=p.stem)
                 note = self.config.get("ToolInfo", tool_path + "_note", fallback="")
 
@@ -92,13 +283,20 @@ def scan_directory(self, directory: Path, category_name: str):
                     "note": note
                 })
 
-                # 记录添加信息（注意：category 要用 category_name）
                 record_tool_added(self, tool_path, custom_name, category_name, note)
 
     except Exception as e:
         print(f"扫描目录 {directory} 时出错: {e}")
 
-    return sorted(tools, key=lambda x: x["name"].lower())
+    tools = sorted(tools, key=lambda x: x["name"].lower())
+
+    # ✅ 每次扫描后清理一次（孤儿/越界记录）
+    try:
+        prune_missing_tool_records(self)
+    except Exception:
+        pass
+
+    return tools
 
 
 def scan_directory_for_archives(self, directory: Path, category_name: str):
@@ -127,19 +325,13 @@ def scan_directory_for_archives(self, directory: Path, category_name: str):
 
 
 def record_tool_added(self, tool_path, tool_name, category, note=""):
-    """记录工具添加信息（ToolAddedRecord + 内存 tools_added_record）
-
-    修复点：
-    - 保证 ToolAddedRecord 分区存在（否则会抛 KeyError 或保存失败）
-    - key 统一为 “相对 storage_path 的路径 + 小写”，避免大小写导致查不到版本/添加时间/备注
-    """
+    """记录工具添加信息（ToolAddedRecord + 内存 tools_added_record）"""
     tool_path = str(Path(tool_path))
 
-    # 确保内存字典存在
     if not hasattr(self, "tools_added_record") or not isinstance(self.tools_added_record, dict):
         self.tools_added_record = {}
 
-    # 计算相对 storage 的 key（回退到绝对路径）
+    # key：优先相对 storage_path（这样天然锚定 Storage）
     key = tool_path
     try:
         if hasattr(self, "storage_path") and self.storage_path:
@@ -151,11 +343,9 @@ def record_tool_added(self, tool_path, tool_name, category, note=""):
 
     norm_key = _norm_key(key)
 
-    # 已有记录就不重复写
     if norm_key in self.tools_added_record:
         return
 
-    # 添加时间：优先用文件创建时间，否则当前时间
     add_time = None
     try:
         if os.path.exists(tool_path):
@@ -163,11 +353,9 @@ def record_tool_added(self, tool_path, tool_name, category, note=""):
             add_time = datetime.fromtimestamp(ct).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         add_time = None
-
     if not add_time:
         add_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 类型/版本
     suffix = Path(tool_path).suffix.lower()
     tool_type = get_file_type_category(suffix)
 
@@ -184,7 +372,6 @@ def record_tool_added(self, tool_path, tool_name, category, note=""):
     except Exception:
         version = "未知"
 
-    # 写内存
     self.tools_added_record[norm_key] = {
         "name": tool_name,
         "category": category,
@@ -194,7 +381,7 @@ def record_tool_added(self, tool_path, tool_name, category, note=""):
         "version": version
     }
 
-    # 确保配置分区存在
+    # 确保分区存在
     try:
         if "ToolAddedRecord" not in self.config:
             try:
@@ -204,7 +391,6 @@ def record_tool_added(self, tool_path, tool_name, category, note=""):
     except Exception:
         pass
 
-    # 写配置（覆盖写入最安全）
     try:
         self.config["ToolAddedRecord"][norm_key] = f"{tool_name}|{category}|{add_time}|{tool_type}|{note}|{version}"
         self.config_manager.save_config()
